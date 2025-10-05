@@ -1,138 +1,117 @@
 # src/rules_engine.py
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple, Optional
+"""
+Motore a regole (forward chaining semplificato) con priorità e spiegazioni.
+- Regole CRITICHE: assegnano direttamente Rosso (override).
+- Regole di SUPPORTO: impongono un 'triage_min' (almeno Giallo/Verde).
+Nessuna regola critica usa 'unknown' -> evita falsi positivi Rosso.
+"""
 
-Condition = Tuple[str, Any]  # es. ("spo2_cat", "severa")
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
 
-@dataclass
-class Rule:
-    id: str
-    any_conditions: List[Condition] = field(default_factory=list)  # almeno una vera
-    all_conditions: List[Condition] = field(default_factory=list)  # tutte vere
-    then: Dict[str, Any] = field(default_factory=dict)             # es. {"triage": "Rosso"}
-    priority: int = 0                                              # più alto -> più urgente
-
-    @property
-    def specificity(self) -> int:
-        return len(self.any_conditions) + len(self.all_conditions)
-
-    def matches(self, facts: Dict[str, Any]) -> bool:
-        # ALL
-        for k, v in self.all_conditions:
-            if facts.get(k) != v:
-                return False
-        # ANY (se presente almeno una dev'essere vera)
-        if self.any_conditions:
-            return any(facts.get(k) == v for k, v in self.any_conditions)
-        return True  # nessuna ANY -> ok
-
-# ---------- Knowledge Base ----------
-def default_kb() -> List[Rule]:
-    return [
-        # CRITICHE → override Rosso
-        Rule(
-            id="R1_ipossia_shock_coscienza",
-            any_conditions=[("spo2_cat", "severa"), ("sbp_cat", "severa"), ("alterazione_coscienza", "yes")],
-            then={"triage": "Rosso"},
-            priority=100,
-        ),
-        Rule(
-            id="R2_trauma_o_sanguinamento",
-            any_conditions=[("trauma_magg", "yes"), ("sanguinamento_massivo", "yes")],
-            then={"triage": "Rosso"},
-            priority=95,
-        ),
-
-        # IMPORTANTI → almeno Giallo
-        Rule(
-            id="R3_dolore_toracico_e_dispnea",
-            all_conditions=[("dolore_toracico", "yes"), ("dispnea", "yes")],
-            then={"triage_min": "Giallo"},
-            priority=70,
-        ),
-        Rule(
-            id="R4_tachipnea_moderata_con_dispnea",
-            all_conditions=[("rr_cat", "alta"), ("dispnea", "yes")],
-            then={"triage_min": "Giallo"},
-            priority=60,
-        ),
-
-        # NON critiche → Verde (se nessun allarme)
-        Rule(
-            id="R5_febbre_alta_senza_allarme",
-            all_conditions=[("temp_cat", "alta"), ("alterazione_coscienza", "no"), ("dispnea", "no")],
-            then={"triage": "Verde"},
-            priority=40,
-        ),
-
-        # FALLBACK
-        Rule(
-            id="R6_fallback_bianco",
-            then={"triage": "Bianco"},
-            priority=0,
-        ),
-    ]
-
+# ordine di severità (da meno a più grave)
 ORDER = ["Bianco", "Verde", "Giallo", "Rosso"]
 
 def max_severity(a: str, b: str) -> str:
     return a if ORDER.index(a) >= ORDER.index(b) else b
 
-def forward_chain(facts: Dict[str, Any], kb: Optional[List[Rule]] = None) -> tuple[str, List[str], Dict[str, Any]]:
+@dataclass
+class Rule:
+    id: str
+    if_: Dict[str, str]          # condizioni esatte key==value (AND)
+    then: Dict[str, str]         # {"triage": "..."} oppure {"triage_min": "..."}
+    priority: int                # per risoluzione conflitti: numeri più alti = più importanti
+    desc: str                    # descrizione leggibile
+
+def default_kb() -> List[Rule]:
     """
-    Ritorna: (triage_finale, regole_attivate, facts_finali)
-    Risoluzione conflitti: priority DESC, specificity DESC, ordine in lista.
-    Supporta 'triage' (hard set) e 'triage_min' (minimo garantito).
+    Conoscenza clinica (semplificata) con priorità:
+    100 = critiche (Rosso),
+     50 = minimi garantiti (>= Giallo),
+     20 = minimi leggeri (>= Verde)
     """
-    if kb is None:
-        kb = default_kb()
+    rules: List[Rule] = []
 
-    fired: List[str] = []
-    facts = dict(facts)
-    changed = True
-    triage_min: Optional[str] = None
+    # ---- CRITICHE -> ROSSO (override) ----
+    rules += [
+        Rule("R_CRIT_SPO2", {"spo2_cat": "severa"}, {"triage": "Rosso"}, 100,
+             "SpO₂ severamente bassa"),
+        Rule("R_CRIT_SBP", {"sbp_cat": "severa"}, {"triage": "Rosso"}, 100,
+             "Ipotensione severa (shock)"),
+        Rule("R_CRIT_COSC", {"alterazione_coscienza": "yes"}, {"triage": "Rosso"}, 100,
+             "Alterazione dello stato di coscienza"),
+        Rule("R_CRIT_TRAUMA", {"trauma_magg": "yes"}, {"triage": "Rosso"}, 100,
+             "Trauma maggiore"),
+        Rule("R_CRIT_BLEED", {"sanguinamento_massivo": "yes"}, {"triage": "Rosso"}, 100,
+             "Sanguinamento massivo"),
+    ]
 
-    while changed:
-        changed = False
-        candidates = [r for r in kb if r.id not in fired and r.matches(facts)]
-        if not candidates:
-            break
-        candidates.sort(key=lambda r: (r.priority, r.specificity), reverse=True)
-        r = candidates[0]
+    # ---- MINIMI GARANTITI (>= Giallo) ----
+    rules += [
+        Rule("R_MIN_TORACE_DISP", {"dolore_toracico": "yes", "dispnea": "yes"},
+             {"triage_min": "Giallo"}, 50, "Dolore toracico + Dispnea ⇒ almeno Giallo"),
+        Rule("R_MIN_RR_DISP", {"rr_cat": "alta", "dispnea": "yes"},
+             {"triage_min": "Giallo"}, 50, "Tachipnea + Dispnea ⇒ almeno Giallo"),
+    ]
 
-        # applica effetti
+    # ---- MINIMI LEGGERI (>= Verde) ----
+    rules += [
+        Rule("R_MIN_FEBBRE_SENZA_DISP", {"temp_cat": "alta", "dispnea": "no", "alterazione_coscienza": "no"},
+             {"triage_min": "Verde"}, 20, "Febbre alta senza dispnea/alterazione ⇒ almeno Verde"),
+    ]
+
+    return rules
+
+def _match(rule: Rule, facts: Dict[str, str]) -> bool:
+    # tutte le condizioni devono essere rispettate esattamente
+    for k, v in rule.if_.items():
+        if facts.get(k) != v:
+            return False
+    return True
+
+def forward_chain(facts: Dict[str, str]) -> Tuple[str, List[str], Dict[str, str]]:
+    """
+    Esegue il matching di tutte le regole e risolve i conflitti.
+    Ritorna:
+      - triage_rules: colore assegnato dalle regole (Rosso se critiche, altrimenti Bianco)
+      - fired: lista ID regole attivate (per spiegazioni)
+      - facts_out: copia dei facts (immutati)
+    Nota: il 'triage_min' sarà letto fuori (es. da Streamlit) usando default_kb().
+    """
+    kb = default_kb()
+    fired: List[Rule] = []
+
+    # ordina per priorità decrescente (critiche prima), a parità mantieni ordine dichiarazione
+    kb_sorted = sorted(kb, key=lambda r: r.priority, reverse=True)
+
+    # colleziona tutte le regole che matchano
+    for r in kb_sorted:
+        if _match(r, facts):
+            fired.append(r)
+
+    # se qualunque regola assegna triage diretto, scegli il più severo tra quelle
+    triage_direct = None
+    for r in fired:
         if "triage" in r.then:
-            facts["triage"] = r.then["triage"]
-        if "triage_min" in r.then:
-            triage_min = r.then["triage_min"] if triage_min is None else max_severity(triage_min, r.then["triage_min"])
+            tri = r.then["triage"]
+            triage_direct = tri if triage_direct is None else max_severity(triage_direct, tri)
 
-        fired.append(r.id)
-        changed = True
+    if triage_direct is not None:
+        # override (es. Rosso)
+        return triage_direct, [r.id for r in fired], dict(facts)
 
-        # se già Rosso → stop
-        if facts.get("triage") == "Rosso":
-            break
+    # nessuna diretta -> le regole attivate (se presenti) impongono minimi (letto a valle)
+    # per compatibilità, ritorniamo "Bianco" come triage delle sole regole
+    return "Bianco", [r.id for r in fired], dict(facts)
 
-    # consolidamento minimo garantito
-    triage = facts.get("triage", "Bianco")
-    if triage_min is not None:
-        triage = max_severity(triage, triage_min)
-        facts["triage"] = triage
-
-    return triage, fired, facts
-
-def explain_rules(fired_ids: List[str], kb: Optional[List[Rule]] = None) -> str:
-    kb = kb or default_kb()
-    by_id = {r.id: r for r in kb}
+def explain_rules(fired_ids: List[str]) -> str:
+    """Restituisce testo leggibile con ID e descrizione delle regole attivate."""
+    kb = {r.id: r for r in default_kb()}
     lines = []
     for rid in fired_ids:
-        r = by_id[rid]
-        cond_any = " OR ".join([f"{k}={v}" for k, v in r.any_conditions]) if r.any_conditions else ""
-        cond_all = " AND ".join([f"{k}={v}" for k, v in r.all_conditions]) if r.all_conditions else ""
-        if cond_any and cond_all:
-            cond = f"({cond_all}) OR ({cond_any})"
-        else:
-            cond = cond_all or cond_any or "TRUE"
-        then_str = ", ".join([f"{k}→{v}" for k, v in r.then.items()])
-        lines.append(f"- {rid}: se {cond} allora {then_str} [prio={r.priority}]")
-    return "\n".join(lines)
+        r = kb.get(rid)
+        if r:
+            action = r.then.get("triage") or f"≥ {r.then.get('triage_min')}"
+            lines.append(f"- [{rid}] (prio {r.priority}) → {action}: {r.desc}")
+    return "\n".join(lines) if lines else "—"

@@ -1,21 +1,24 @@
 # src/naive_bayes.py
 """
-Naive Bayes per il Triage — Versione definitiva (commentata passo-passo)
-=======================================================================
-Obiettivo:
-- Leggere un dataset CATEGORIALE PREESISTENTE (data/examples.csv).
-- Allenare Bernoulli Naive Bayes su quello (con pesi anti-sbilanciamento).
-- Fornire predizione delle probabilità P(y|x) e decisione "prudente" (costo atteso).
-- Esportare un modello salvato in data/nb_model.pkl e ricaricabile.
+Naive Bayes per il Triage — versione definitiva (commentata)
+============================================================
+Obiettivi:
+- Caricare un dataset CATEGORIALE preesistente (data/examples.csv).
+- Allenare un Bernoulli Naive Bayes su quello (opzione anti-sbilanciamento).
+- Predire P(y|x) per tutte le classi e decidere in modo "prudente" con costo atteso.
+- Salvare/ricaricare il modello (data/nb_model.pkl).
+- Aggiungere un "guardrail" per evitare ROSSO quando la sua probabilità è troppo bassa
+  e non c'è un vincolo dalle regole (triage_min).
 
-Nota: questa versione NON genera dataset sintetici. Se il CSV non esiste, solleva un errore chiaro.
+NOTE IMPORTANTI
+- Nessuna generazione sintetica di CSV: se il file manca, solleviamo un errore chiaro.
+- Lo schema delle feature (FEATURE_SPACE) deve corrispondere alle colonne categoriali nel CSV.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
-
 import csv
 import os
 import pickle
@@ -75,47 +78,45 @@ def encode_onehot(facts: Dict[str, str]) -> np.ndarray:
     return x
 
 def max_severity(a: str, b: str) -> str:
-    """
-    Ritorna la classe più severa tra a e b (usiamo l'ordine in CLASSES).
-    """
+    """Ritorna la classe più severa tra a e b (usiamo l'ordine in CLASSES)."""
     return a if CLASSES.index(a) >= CLASSES.index(b) else b
 
 # -------------------------------------------------------------------
 # 3) Matrice dei COSTI — decisione "prudente" (costo atteso)
 # -------------------------------------------------------------------
-# DEFAULT_COST[(y_true, y_pred)] = quanto ci costa quell'errore.
+# DEFAULT_COST[(y_true, y_pred)] = costo di scegliere y_pred quando la vera è y_true.
 DEFAULT_COST: Dict[Tuple[str, str], float] = {}
 def _init_default_cost():
-    # di default: costo 1 per qualsiasi errore, 0 se corretto
+    # base: costo 1 per qualsiasi errore, 0 se corretto
     for ytrue in CLASSES:
         for yhat in CLASSES:
             DEFAULT_COST[(ytrue, yhat)] = 0.0 if ytrue == yhat else 1.0
-    # personalizziamo: sottostimare Rosso costa moltissimo
-    DEFAULT_COST[("Rosso", "Giallo")] = 100
-    DEFAULT_COST[("Rosso", "Verde")]  = 200
-    DEFAULT_COST[("Rosso", "Bianco")] = 500
-    # sottostimare Giallo costa intermedio
-    DEFAULT_COST[("Giallo", "Verde")]  = 20
-    DEFAULT_COST[("Giallo", "Bianco")] = 40
-    # falsi positivi "verso l'alto" costano poco
-    DEFAULT_COST[("Verde", "Giallo")] = 5
+
+    # SOTTO-STIMA del Rosso (ancora costosa, ma non eccessiva)
+    DEFAULT_COST[("Rosso", "Giallo")] = 30
+    DEFAULT_COST[("Rosso", "Verde")]  = 60
+    DEFAULT_COST[("Rosso", "Bianco")] = 120
+
+    # SOTTO-STIMA del Giallo
+    DEFAULT_COST[("Giallo", "Verde")]  = 8
+    DEFAULT_COST[("Giallo", "Bianco")] = 16
+
+    # Sovrastime verso l’alto (falsi positivi gravi) con costi moderati
+    DEFAULT_COST[("Verde", "Giallo")] = 4
     DEFAULT_COST[("Bianco", "Verde")] = 3
-    DEFAULT_COST[("Verde", "Rosso")]  = 8
-    DEFAULT_COST[("Bianco", "Rosso")] = 10
+    DEFAULT_COST[("Verde", "Rosso")]  = 6
+    DEFAULT_COST[("Bianco", "Rosso")] = 8
+
 _init_default_cost()
 
 def expected_cost(probs: Dict[str, float], yhat: str,
                   cost_matrix: Dict[Tuple[str, str], float] = DEFAULT_COST) -> float:
-    """
-    Costo atteso di scegliere yhat = somma_y [ P(y|x) * C[y, yhat] ].
-    """
+    """Costo atteso: E[C|yhat] = somma_y P(y|x)*C[y,yhat]."""
     return sum(probs[ytrue] * cost_matrix[(ytrue, yhat)] for ytrue in CLASSES)
 
 def argmin_expected_cost(probs: Dict[str, float],
                          cost_matrix: Dict[Tuple[str, str], float] = DEFAULT_COST) -> str:
-    """
-    Restituisce la classe con costo atteso minimo (decisione prudente).
-    """
+    """Restituisce la classe con costo atteso minimo (decisione prudente)."""
     best, best_cost = None, float("inf")
     for yhat in CLASSES:
         c = expected_cost(probs, yhat, cost_matrix)
@@ -124,14 +125,14 @@ def argmin_expected_cost(probs: Dict[str, float],
     return best
 
 # -------------------------------------------------------------------
-# 4) Wrapper del modello NB: predizione robusta + decisione cost-sensitive
+# 4) Wrapper del modello NB: proba robuste + decisione cost-sensitive
 # -------------------------------------------------------------------
 @dataclass
 class NBModel:
     """
-    Semplice wrapper attorno a BernoulliNB:
+    Wrapper attorno a BernoulliNB:
     - predizione delle probabilità per tutte le 4 classi (anche se in training ne mancava una)
-    - decisione finale "cost-sensitive"
+    - decisione finale "cost-sensitive" con guardrail su Rosso
     """
     nb: BernoulliNB
     onehot_keys: List[str] = None
@@ -144,7 +145,7 @@ class NBModel:
               Qui rimappiamo le probabilità su tutte le CLASSES, mettendo 0.0 per le assenti.
         """
         x = encode_onehot(facts).reshape(1, -1)
-        p = self.nb.predict_proba(x)[0]  # array lunghezza = numero classi viste
+        p = self.nb.predict_proba(x)[0]  # array di lunghezza = classi viste
         probs = {c: 0.0 for c in CLASSES}
         for j, cls_idx in enumerate(self.nb.classes_):
             label_name = CLASSES[int(cls_idx)]
@@ -153,18 +154,48 @@ class NBModel:
 
     def decide_cost_sensitive(self, facts: Dict[str, str],
                               triage_min: Optional[str] = None,
-                              cost_matrix: Dict[Tuple[str, str], float] = DEFAULT_COST
+                              cost_matrix: Dict[Tuple[str, str], float] = DEFAULT_COST,
+                              rosso_min_prob: float = 0.15,
+                              map_margin: float = 0.10  # margine per preferire MAP rispetto al costo
                               ) -> Tuple[str, Dict[str, float]]:
         """
-        1) Stima P(y|x).
-        2) Sceglie la classe che minimizza il COSTO ATTESO.
-        3) Se c'è un 'minimo garantito' (triage_min) dalle regole, non scende sotto quel livello.
+        1) Calcola P(y|x).
+        2) Sceglie argmin del costo atteso.
+        3) Applica triage_min (vincolo dalle regole).
+        4) Guardrail: se Rosso non è vincolato e p(Rosso) < soglia, evita Rosso.
+        5) Se Rosso è stato escluso e NON c’è triage_min, preferisci la classe MAP
+           (massima probabilità) quando è più probabile del candidato a costo minimo
+           di almeno 'map_margin'.
         """
         probs = self.predict_proba(facts)
+        # scelta iniziale: costo atteso
         y = argmin_expected_cost(probs, cost_matrix)
+
+        # vincolo dalle regole
         if triage_min is not None:
             y = max_severity(y, triage_min)
+
+        # guardrail anti-Rosso
+        if (triage_min != "Rosso") and (y == "Rosso"):
+            if probs.get("Rosso", 0.0) < rosso_min_prob:
+                # ricalcola su sole classi non-Rosso
+                candidates = [c for c in CLASSES if c != "Rosso"]
+                best, best_cost = None, float("inf")
+                for c in candidates:
+                    cst = expected_cost(probs, c, cost_matrix)
+                    if cst < best_cost:
+                        best, best_cost = c, cst
+                y = best
+
+        # fallback “di buon senso”: se NON c’è triage_min e Rosso non è obbligato,
+        # preferisci la classe con probabilità massima quando è chiaramente più probabile.
+        if triage_min is None:
+            map_label = max(probs.items(), key=lambda kv: kv[1])[0]
+            if map_label != y and (probs[map_label] - probs[y] >= map_margin):
+                y = map_label
+
         return y, probs
+
 
 # -------------------------------------------------------------------
 # 5) Fit/Save/Load — allenamento su dataset CATEGORIALE + persistenza
@@ -181,10 +212,12 @@ def load_model(path: str) -> NBModel:
 def fit_from_dicts(samples: List[Dict[str, str]], labels: List[str]) -> NBModel:
     """
     Allena BernoulliNB da samples categoriali + labels.
-    Include una "rete di sicurezza": se nel dataset manca una classe, aggiunge un esempio minimo.
+    Include una "rete di sicurezza": se nel dataset manca una classe, aggiunge un esempio minimo,
+    così nb.classes_ copre sempre tutte le 4 classi (Bianco/Verde/Giallo/Rosso).
     """
     present = set(labels)
-    # booster per classi mancanti (evita modelli "a 3 classi")
+
+    # Booster per classi mancanti (evita modelli “a 3 classi”)
     if "Rosso" not in present:
         samples.append({
             "spo2_cat": "severa", "sbp_cat": "ok", "rr_cat": "ok", "temp_cat": "ok",
@@ -210,7 +243,7 @@ def fit_from_dicts(samples: List[Dict[str, str]], labels: List[str]) -> NBModel:
             "trauma_magg": "no", "sanguinamento_massivo": "no",
         }); labels.append("Bianco")
 
-    # one-hot + fit
+    # One-hot + fit
     X = np.vstack([encode_onehot(s) for s in samples])
     y = np.array([CLASS_INDEX[l] for l in labels], dtype=np.int64)
 
@@ -223,7 +256,7 @@ def fit_from_dicts(samples: List[Dict[str, str]], labels: List[str]) -> NBModel:
 # -------------------------------------------------------------------
 def _normalize_label(s: str) -> str:
     s = (s or "").strip()
-    mapping = {"bianco":"Bianco","verde":"Verde","giallo":"Giallo","rosso":"Rosso"}
+    mapping = {"bianco": "Bianco", "verde": "Verde", "giallo": "Giallo", "rosso": "Rosso"}
     return mapping.get(s.lower(), s)
 
 def load_dataset_csv(csv_path: str, label_col: str = "label") -> Tuple[List[Dict[str, str]], List[str]]:
@@ -235,7 +268,7 @@ def load_dataset_csv(csv_path: str, label_col: str = "label") -> Tuple[List[Dict
     if not os.path.exists(csv_path):
         raise FileNotFoundError(
             f"[NaiveBayes] CSV non trovato: {csv_path}. "
-            f"Assicurati di aver messo il dataset in quella posizione."
+            f"Metti il dataset categoriale in quella posizione (es. data/examples.csv)."
         )
 
     samples, labels = [], []
@@ -250,7 +283,7 @@ def load_dataset_csv(csv_path: str, label_col: str = "label") -> Tuple[List[Dict
 
             label = _normalize_label(row.get(label_col, ""))
             if label not in CLASSES:
-                # se la label non è valida, saltiamo la riga
+                # label non valida -> salta riga
                 continue
 
             samples.append(facts)
@@ -270,7 +303,7 @@ def train_nb_from_csv(csv_path: str,
     - Shuffle + train/val split.
     - (Opzionale) pesi anti-sbilanciamento (inverso-frequenza per classe).
     - Fit BernoulliNB.
-    - Valutazione rapida su holdout (accuracy + matrice di confusione).
+    - Valutazione rapida su holdout (accuracy + confusion matrix).
     - Salva il modello.
     """
     X_facts, y_labels = load_dataset_csv(csv_path)
@@ -295,8 +328,10 @@ def train_nb_from_csv(csv_path: str,
         inv = {c: 1.0 / max(1, cnt[c]) for c in CLASSES}
         sample_weight = np.array([inv[y] for y in y_tr], dtype=np.float64)
 
-    # fit robusto
+    # fit robusto (aggiunge eventuali classi mancanti)
     model = fit_from_dicts(X_tr, y_tr)
+
+    # ri-fit con pesi, se richiesto
     if sample_weight is not None:
         X = np.vstack([encode_onehot(s) for s in X_tr])
         y = np.array([CLASS_INDEX[l] for l in y_tr], dtype=np.int64)
@@ -332,7 +367,7 @@ def ensure_trained(model_path: str = "data/nb_model.pkl",
     """
     Se esiste il modello salvato -> lo carica.
     Altrimenti, allena NAIVE BAYES leggendo il CSV *categoriale* `csv_path`.
-    Se il CSV non c'è, solleva un errore (niente generazione automatica).
+    Se il CSV non c'è, solleva un errore (nessuna generazione automatica).
     """
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
 

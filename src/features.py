@@ -1,64 +1,59 @@
 # src/features.py
+"""
+Discretizzazione dei dati grezzi in feature categoriali coerenti col FEATURE_SPACE:
+- spo2_cat: severa (<90), moderata (90–93), ok (>=94), unknown
+- sbp_cat:  severa (<90), ok (>=90), unknown
+- rr_cat:   alta (>=24), ok (<24), unknown
+- temp_cat: alta (>=38.0), ok (<38.0), unknown
+Sintomi tri-stato: 1->"yes", 0->"no", None->"unknown"
+"""
 
-def preprocess_input(data: dict) -> dict:
+from typing import Optional, Dict
+
+# ---- soglie cliniche (semplificate) ----
+SPO2_SEVERE_LT = 90       # < 90 -> severa
+SPO2_MOD_LT    = 94       # [90..93] -> moderata, >=94 -> ok
+SBP_SEVERE_LT  = 90       # < 90 -> severa
+RR_HIGH_GE     = 24       # >= 24 -> alta
+TEMP_HIGH_GE   = 38.0     # >= 38.0 -> alta
+
+# --------- mapping funzioni ---------
+
+def cat_spo2(spo2):
+    if spo2 is None: return "unknown"
+    return "severa" if spo2 < 90 else ("moderata" if spo2 < 94 else "ok")
+
+def cat_sbp(sbp):
+    if sbp is None: return "unknown"
+    return "severa" if sbp < 90 else "ok"
+
+def cat_rr(rr):
+    if rr is None: return "unknown"
+    return "alta" if rr >= 24 else "ok"
+
+def cat_temp(t):
+    if t is None: return "unknown"
+    return "alta" if t >= 38.0 else "ok"
+
+def tri_to_str(v):
+    return "yes" if v == 1 else ("no" if v == 0 else "unknown")
+
+
+# --------- preprocess principale ---------
+def preprocess_input(raw: Dict) -> Dict[str, str]:
     """
-    Converte i valori grezzi del form (vitali + sintomi)
-    in categorie utili per il motore a regole e, in futuro, per NB.
+    Converte l'input grezzo (numeri + tri-stato 1/0/None) in feature categoriali.
+    Restituisce un dizionario allineato allo schema atteso da rules_engine / naive_bayes.
     """
-    processed = {}
-
-    # --- Vitali ---
-    # SpO2 (saturazione ossigeno, %)
-    spo2 = data.get("SpO2", None)
-    if spo2 is None:
-        processed["spo2_cat"] = "unknown"
-    elif spo2 <= 90:
-        processed["spo2_cat"] = "severa"
-    elif spo2 <= 94:
-        processed["spo2_cat"] = "moderata"
-    else:
-        processed["spo2_cat"] = "ok"
-
-    # SBP (pressione sistolica, mmHg)
-    sbp = data.get("SBP", None)
-    if sbp is None:
-        processed["sbp_cat"] = "unknown"
-    elif sbp < 90:
-        processed["sbp_cat"] = "severa"
-    else:
-        processed["sbp_cat"] = "ok"
-
-    # RR (atti/min)
-    rr = data.get("RR", None)
-    if rr is None:
-        processed["rr_cat"] = "unknown"
-    elif rr >= 30:
-        processed["rr_cat"] = "alta"
-    else:
-        processed["rr_cat"] = "ok"
-
-    # Temp (°C)
-    temp = data.get("Temp", None)
-    if temp is None:
-        processed["temp_cat"] = "unknown"
-    elif temp >= 39.0:
-        processed["temp_cat"] = "alta"
-    else:
-        processed["temp_cat"] = "ok"
-
-    # --- Sintomi binari (0/1/None) -> no/yes/unknown ---
-    def to_yn(val):
-        if val is None:
-            return "unknown"
-        return "yes" if int(val) == 1 else "no"
-
-    for s in [
-        "dolore_toracico",
-        "dispnea",
-        "alterazione_coscienza",
-        "trauma_magg",
-        "sanguinamento_massivo",
-    ]:
-        processed[s] = to_yn(data.get(s, None))
-
-    return processed
+    facts = {
+        "spo2_cat": cat_spo2(raw.get("SpO2")),
+        "sbp_cat":  cat_sbp(raw.get("SBP")),
+        "rr_cat":   cat_rr(raw.get("RR")),
+        "temp_cat": cat_temp(raw.get("Temp")),
+        "dolore_toracico":       tri_to_str(raw.get("dolore_toracico")),
+        "dispnea":               tri_to_str(raw.get("dispnea")),
+        "alterazione_coscienza": tri_to_str(raw.get("alterazione_coscienza")),
+        "trauma_magg":           tri_to_str(raw.get("trauma_magg")),
+        "sanguinamento_massivo": tri_to_str(raw.get("sanguinamento_massivo")),
+    }
+    return facts

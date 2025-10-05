@@ -9999,3 +9999,11 @@ ok,ok,ok,ok,no,yes,unknown,no,no,Bianco
 severa,ok,ok,ok,unknown,no,yes,no,no,Rosso
 ok,ok,ok,ok,yes,no,no,no,no,Bianco
 moderata,ok,ok,ok,yes,no,no,no,no,Bianco
+moderata,ok,alta,alta,yes,unknown,unknown,no,no,Rosso
+moderata,ok,alta,ok,yes,unknown,unknown,no,no,Rosso
+ok,ok,alta,alta,yes,unknown,unknown,no,no,Rosso
+moderata,ok,alta,alta,unknown,unknown,unknown,no,no,Rosso
+ok,ok,alta,alta,yes,unknown,unknown,no,no,Rosso
+moderata,ok,alta,ok,unknown,unknown,unknown,no,no,Rosso
+moderata,ok,alta,alta,yes,unknown,unknown,no,no,Rosso
+ok,ok,alta,alta,unknown,unknown,unknown,no,no,Rosso

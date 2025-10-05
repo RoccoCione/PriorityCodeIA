@@ -2,137 +2,51 @@
 import os, sys
 sys.path.append(os.path.dirname(__file__))
 import pandas as pd
-
 import streamlit as st
 from datetime import datetime
 
 from src.features import preprocess_input
-from src.rules_engine import forward_chain, explain_rules
+from src.rules_engine import forward_chain, explain_rules, default_kb
 from src.priority_queue import TriageQueue, SEVERITY_ORDER
+from src.naive_bayes import ensure_trained, NBModel
 
 # -------- CONFIG --------
 st.set_page_config(page_title="Triage AI (demo)", page_icon="🩺", layout="wide")
 TRIAGE_EMOJI  = {"Rosso":"🔴","Giallo":"🟡","Verde":"🟢","Bianco":"⚪"}
 TRIAGE_COLORS = {"Rosso":"#e74c3c","Giallo":"#f1c40f","Verde":"#2ecc71","Bianco":"#bdc3c7"}
 
-# -------- CUSTOM STYLE (bordo/ombre per metric e tabella + card generica) --------
+# ---- NB MODEL (una sola volta, in sessione) ----
+if "nb_model" not in st.session_state:
+    st.session_state.nb_model = ensure_trained(
+        model_path="data/nb_model.pkl",
+        csv_path="data/examples.csv"   # dataset categoriale statico
+    )
+nb_model: NBModel = st.session_state.nb_model
+
+# -------- CUSTOM STYLE --------
 CUSTOM_CSS = """
 <style>
-/* sfondo leggero della pagina */
 section.main > div { background: #f8fafc; }
-/* lieve riduzione gap superiore */
 section.main > div.block-container { padding-top: 1.0rem; }
-
-/* card generica */
-.card {
-  border: none;
-  border-radius: 14px;
-  padding: 16px;
-  box-shadow: 0 1px 2px rgba(0,0,0,.04);
-  background: #ffffff;
-}
-
-/* metric con bordo e ombra + baseline allineata */
-div[data-testid="stMetric"] {
-  border: 1px solid #ffffff;
-  border-radius: 12px;
-  padding: 12px 14px;
-  box-shadow: 0 1px 2px rgba(0,0,0,.03);
-  color: #ffffff;
-  align-items: flex-end;            /* baseline */
-}
-div[data-testid="stMetric"] > div { padding-bottom: 0 !important; } /* baseline */
-div[data-testid="stMetricValue"] { line-height: 1; }                 /* baseline */
-div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
-  color: #ffffff !important;
-  font-weight: 1000;
-  margin-bottom: 0.15rem;          /* baseline */
-}
-div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-  font-weight: 1000;
-}
-
-/* contenitore della tabella con bordo e raggio */
-div[data-testid="stDataFrame"] {
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  overflow: hidden;
-  background: #ffffff;
-  box-shadow: 0 1px 2px rgba(0,0,0,.04);
-}
-
-/* badge semplice */
-.badge {
-  display:inline-block;
-  background:#eef2f7;
-  padding:6px 10px;
-  border-radius:999px;
-  font-weight:700;
-  border:1px solid #e5e7eb;
-}
-
-/* --- card "in servizio" con stile scuro/trasparente --- */
-.serving {
-  position: relative;
-  border-radius: 14px;
-  padding: 14px 16px 12px 16px;
-  background: transparent;          /* sfondo trasparente */
-  display: grid;
-  grid-template-columns: 1fr auto;
-  row-gap: 8px;
-  margin-bottom: 12px;
-  color: #ffffff;                   /* testi bianchi */
-  font-size: 1.1rem;                /* testi più grandi */
-}
-.serving::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0; bottom: 0;
-  width: 6px;
-  border-top-left-radius: 14px;
-  border-bottom-left-radius: 14px;
-  background: var(--serving-accent, #94a3b8);
-}
-.serving .title {
-  font-weight: 700;
-  font-size: 1.2rem;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.serving .meta {
-  font-size: 1rem;
-  color: #ffffff; /* testi bianchi */
-}
-
-/* --- font size globale --- */
-html, body, [class^="css"], [class*="css"] {
-  font-size: 1.1rem;   /* ingrandisce tutto del ~10% */
-}
-
-h1, .stMarkdown h1, div[data-testid="stHeader"] {
-  font-size: 2.0rem !important;
-}
-h2, .stMarkdown h2 {
-  font-size: 1.6rem !important;
-}
-h3, .stMarkdown h3 {
-  font-size: 1.3rem !important;
-}
-code, pre, .stCode {
-  font-size: 0.95rem !important;  /* mantiene codice un po’ più piccolo */
-}
-
-/* --- tabs compatti per sezione Dettagli --- */
+.card { border: none; border-radius: 14px; padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04); background: #ffffff; }
+div[data-testid="stMetric"] { border: 1px solid #ffffff; border-radius: 12px; padding: 12px 14px; box-shadow: 0 1px 2px rgba(0,0,0,.03); color: #ffffff; align-items: flex-end; }
+div[data-testid="stMetric"] > div { padding-bottom: 0 !important; }
+div[data-testid="stMetricValue"] { line-height: 1; }
+div[data-testid="stMetric"] [data-testid="stMetricLabel"] { color: #ffffff !important; font-weight: 1000; margin-bottom: 0.15rem; }
+div[data-testid="stMetric"] [data-testid="stMetricValue"] { font-weight: 1000; }
+div[data-testid="stDataFrame"] { border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+.badge { display:inline-block; background:#eef2f7; padding:6px 10px; border-radius:999px; font-weight:700; border:1px solid #e5e7eb; }
+.serving { position: relative; border-radius: 14px; padding: 14px 16px 12px 16px; background: transparent; display: grid; grid-template-columns: 1fr auto; row-gap: 8px; margin-bottom: 12px; color: #ffffff; font-size: 1.1rem; }
+.serving::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 6px; border-top-left-radius: 14px; border-bottom-left-radius: 14px; background: var(--serving-accent, #94a3b8); }
+.serving .title { font-weight: 700; font-size: 1.2rem; display: flex; align-items: center; gap: 6px; }
+.serving .meta { font-size: 1rem; color: #ffffff; }
+html, body, [class^="css"], [class*="css"] { font-size: 1.1rem; }
+h1, .stMarkdown h1, div[data-testid="stHeader"] { font-size: 2.0rem !important; }
+h2, .stMarkdown h2 { font-size: 1.6rem !important; }
+h3, .stMarkdown h3 { font-size: 1.3rem !important; }
+code, pre, .stCode { font-size: 0.95rem !important; }
 .stTabs [data-baseweb="tab-list"] { gap: 6px; }
-.stTabs [data-baseweb="tab"] {
-  padding: 6px 10px;
-  border-radius: 10px;
-  border: 1px solid #e5e7eb;
-  box-shadow: 0 1px 2px rgba(0,0,0,.03);
-}
-
+.stTabs [data-baseweb="tab"] { padding: 6px 10px; border-radius: 10px; border: 1px solid #e5e7eb; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -164,9 +78,24 @@ def tri_badge(text: str):
         unsafe_allow_html=True
     )
 
+def compute_triage_min_from_fired(fired_ids):
+    """
+    Legge la KB per capire se alcune regole attivate impongono un 'triage_min'
+    (es. 'almeno Giallo'). Ritorna None se non ci sono vincoli.
+    """
+    kb = {r.id: r for r in default_kb()}
+    order = ["Bianco","Verde","Giallo","Rosso"]
+    def max_sev(a,b): return a if order.index(a) >= order.index(b) else b
+    tri_min = None
+    for rid in fired_ids:
+        r = kb.get(rid)
+        if r and "triage_min" in r.then:
+            tri_min = r.then["triage_min"] if tri_min is None else max_sev(tri_min, r.then["triage_min"])
+    return tri_min
+
 # -------- HEADER + CONTATORI --------
 st.title("🩺 Triage Medico Semplificato — Demo")
-st.caption("Agente a regole + coda a priorità (uso didattico, non clinico).")
+st.caption("Agente a regole + Naive Bayes (prudente) + coda a priorità. Uso didattico, non clinico.")
 
 counts = counts_by_class()
 c1, c2, c3, c4 = st.columns(4)
@@ -228,31 +157,39 @@ with col_form:
             "sanguinamento_massivo": sanguinamento_massivo,
         }
 
+        # ---- Preprocess -> Regole -> (Rosso? stop) / altrimenti NB cost-sensitive ----
         facts = preprocess_input(raw)
-        triage, fired, facts_out = forward_chain(facts)
+        triage_rules, fired, facts_out = forward_chain(facts)
+
+        if triage_rules == "Rosso":
+            final_triage = "Rosso"
+            probs = {"Bianco":0.0,"Verde":0.0,"Giallo":0.0,"Rosso":1.0}
+        else:
+            triage_min = compute_triage_min_from_fired(fired)  # es. "Giallo" come minimo garantito
+            final_triage, probs = nb_model.decide_cost_sensitive(facts_out, triage_min=triage_min)
+
+        # ---- Inserisci in coda + salva risultato in sessione ----
         patient = q.enqueue(
-            triage=triage,
-            payload={"name": raw["name"], "facts": facts_out, "rules": fired}
+            triage=final_triage,
+            payload={"name": raw["name"], "facts": facts_out, "rules": fired, "probs": probs}
         )
         pos = q.get_position(patient.patient_id)
 
         st.session_state.last_result = {
-            "triage": triage,
+            "triage": final_triage,
             "pos": pos,
             "queue_len": len(q),
             "rules": fired,
             "facts": facts_out,
             "name": raw["name"],
             "id": patient.patient_id,
+            "probs": probs
         }
         st.rerun()  # aggiorna contatori + tabella subito
 
     if reset:
-        # azzera anche il riquadro “Risultato”
         st.session_state.last_result = None
         st.rerun()
-
-    st.markdown('</div>', unsafe_allow_html=True)  # chiusura card del form
 
 with col_res:
     st.subheader("Risultato")
@@ -265,11 +202,13 @@ with col_res:
         st.write(f"**Posizione in coda:** {lr['pos']} su {lr['queue_len']}")
         st.write("**Regole attivate:**")
         st.code(explain_rules(lr["rules"]), language="text")
-    st.markdown('</div>', unsafe_allow_html=True)
+        if "probs" in lr and lr["probs"]:
+            st.write("**Probabilità (Naive Bayes):**")
+            st.json({k: round(v, 3) for k, v in lr["probs"].items()})
 
 st.divider()
 
-# -------- CODA: tabella (con bordo) + barra azioni --------
+# -------- CODA: tabella + barra azioni --------
 st.subheader("Attualmente in servizio")
 
 snap = q.snapshot()
@@ -306,7 +245,6 @@ else:
     st.divider()
 
     st.subheader("Coda a priorità (globale)")
-    # --- Tabella con colonna 'In servizio' e riga evidenziata ---
     rows = []
     for i, p in enumerate(snap, start=1):
         rows.append({
@@ -320,7 +258,6 @@ else:
     df = pd.DataFrame(rows)
 
     def _opaque_top(row):
-        # rende la PRIMA riga semitrasparente (opaca)
         return ['opacity: 0.55' if row.name == 0 else '' for _ in row]
 
     st.dataframe(
@@ -329,10 +266,9 @@ else:
         hide_index=True
     )
 
-    # --- micro-spazio tra tabella e barra azioni ---
     st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
 
-    # --- BARRA AZIONI (stessa linea) ---
+    # --- BARRA AZIONI ---
     colA, colB1, colB2, colC = st.columns([1, 2, 1, 1])
     with colA:
         if st.button("▶️ Servi prossimo", use_container_width=True):
@@ -373,20 +309,18 @@ else:
             pp = next((p for p in q.snapshot() if p.patient_id == sel), None)
             if pp:
                 st.divider()
-                # Header compatto in 2 colonne
                 h1, h2 = st.columns([1, 1])
                 with h1:
                     st.markdown(f"**ID:** <code>{pp.patient_id}</code>", unsafe_allow_html=True)
                     st.markdown(f"**Nome:** {pp.payload.get('name', '')}")
+
                 with h2:
                     tri_badge(pp.triage)
                     st.markdown(f"**Arrivo (UTC):** {datetime.utcfromtimestamp(pp.arrival_ts).strftime('%H:%M:%S')}")
 
                 st.markdown("---")
 
-                # Contenuti a tab: Regole | Fatti
-                tab_rules, tab_facts = st.tabs(["Regole attivate", "Fatti (features)"])
-
+                tab_rules, tab_facts, tab_probs = st.tabs(["Regole attivate", "Fatti (features)", "Probabilità NB"])
                 with tab_rules:
                     rules_text = explain_rules(pp.payload.get("rules", []))
                     st.code(rules_text or "Nessuna regola attivata.", language="text")
@@ -399,10 +333,48 @@ else:
                         try:
                             st.table(facts_df.style.hide_index())
                         except Exception:
-                            # fallback se hide_index non è disponibile
                             st.dataframe(facts_df, use_container_width=True, hide_index=True)
                     else:
                         st.caption("Nessun fact disponibile.")
 
-                st.markdown('</div>', unsafe_allow_html=True)
+                with tab_probs:
+                    probs = pp.payload.get("probs", {})
+                    if probs:
+                        st.json({k: round(v, 3) for k, v in probs.items()})
+                    else:
+                        st.caption("Nessuna probabilità salvata per questo paziente.")
 
+# ---------- DEBUG DIAGNOSTICO ----------
+with st.expander("🔎 DEBUG pipeline (ultimo inserito)"):
+    lr = st.session_state.last_result
+    if not lr:
+        st.caption("Inserisci prima un paziente.")
+    else:
+        st.write("**Facts (dopo preprocess):**")
+        st.json(lr["facts"])
+
+        st.write("**Regole attivate (IDs):**")
+        st.write(lr["rules"])
+
+        # ricalcolo triage_rules e triage_min (solo debug)
+        triage_rules_dbg, fired_dbg, _facts_out_dbg = forward_chain(lr["facts"])
+        kb_map = {r.id: r for r in default_kb()}
+        order = ["Bianco","Verde","Giallo","Rosso"]
+        def max_sev(a,b): return a if order.index(a) >= order.index(b) else b
+        tri_min_dbg = None
+        for rid in fired_dbg:
+            r = kb_map.get(rid)
+            if r and "triage_min" in r.then:
+                tri_min_dbg = r.then["triage_min"] if tri_min_dbg is None else max_sev(tri_min_dbg, r.then["triage_min"])
+
+        st.write(f"**triage_rules (da regole):** {triage_rules_dbg}")
+        st.write(f"**triage_min (vincolo):** {tri_min_dbg if tri_min_dbg else '—'}")
+
+        # se salvate, mostra proba NB
+        if "probs" in lr:
+            st.write("**Probabilità NB salvate:**")
+            st.json({k: round(v,3) for k,v in lr["probs"].items()})
+        else:
+            st.caption("Nessuna probabilità salvata.")
+
+        st.write(f"**Codice finale:** {lr['triage']}")
