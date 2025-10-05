@@ -20,6 +20,8 @@ CUSTOM_CSS = """
 <style>
 /* sfondo leggero della pagina */
 section.main > div { background: #f8fafc; }
+/* lieve riduzione gap superiore */
+section.main > div.block-container { padding-top: 1.0rem; }
 
 /* card generica */
 .card {
@@ -27,19 +29,24 @@ section.main > div { background: #f8fafc; }
   border-radius: 14px;
   padding: 16px;
   box-shadow: 0 1px 2px rgba(0,0,0,.04);
+  background: #ffffff;
 }
 
-/* metric con bordo e ombra */
+/* metric con bordo e ombra + baseline allineata */
 div[data-testid="stMetric"] {
   border: 1px solid #ffffff;
   border-radius: 12px;
   padding: 12px 14px;
   box-shadow: 0 1px 2px rgba(0,0,0,.03);
   color: #ffffff;
+  align-items: flex-end;            /* baseline */
 }
+div[data-testid="stMetric"] > div { padding-bottom: 0 !important; } /* baseline */
+div[data-testid="stMetricValue"] { line-height: 1; }                 /* baseline */
 div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
   color: #ffffff !important;
   font-weight: 1000;
+  margin-bottom: 0.15rem;          /* baseline */
 }
 div[data-testid="stMetric"] [data-testid="stMetricValue"] {
   font-weight: 1000;
@@ -63,6 +70,69 @@ div[data-testid="stDataFrame"] {
   font-weight:700;
   border:1px solid #e5e7eb;
 }
+
+/* --- card "in servizio" con stile scuro/trasparente --- */
+.serving {
+  position: relative;
+  border-radius: 14px;
+  padding: 14px 16px 12px 16px;
+  background: transparent;          /* sfondo trasparente */
+  display: grid;
+  grid-template-columns: 1fr auto;
+  row-gap: 8px;
+  margin-bottom: 12px;
+  color: #ffffff;                   /* testi bianchi */
+  font-size: 1.1rem;                /* testi più grandi */
+}
+.serving::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0; bottom: 0;
+  width: 6px;
+  border-top-left-radius: 14px;
+  border-bottom-left-radius: 14px;
+  background: var(--serving-accent, #94a3b8);
+}
+.serving .title {
+  font-weight: 700;
+  font-size: 1.2rem;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.serving .meta {
+  font-size: 1rem;
+  color: #ffffff; /* testi bianchi */
+}
+
+/* --- font size globale --- */
+html, body, [class^="css"], [class*="css"] {
+  font-size: 1.1rem;   /* ingrandisce tutto del ~10% */
+}
+
+h1, .stMarkdown h1, div[data-testid="stHeader"] {
+  font-size: 2.0rem !important;
+}
+h2, .stMarkdown h2 {
+  font-size: 1.6rem !important;
+}
+h3, .stMarkdown h3 {
+  font-size: 1.3rem !important;
+}
+code, pre, .stCode {
+  font-size: 0.95rem !important;  /* mantiene codice un po’ più piccolo */
+}
+
+/* --- tabs compatti per sezione Dettagli --- */
+.stTabs [data-baseweb="tab-list"] { gap: 6px; }
+.stTabs [data-baseweb="tab"] {
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 1px 2px rgba(0,0,0,.03);
+}
+
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -142,7 +212,7 @@ with col_form:
 
         col_submit, col_reset = st.columns([1, 1])
         submitted = col_submit.form_submit_button("➕ Inserisci in coda", use_container_width=True)
-        reset = col_reset.form_submit_button("↺ Pulisci campi", use_container_width=True)
+        reset = col_reset.form_submit_button("↺ Pulisci risultato", use_container_width=True)
 
     if submitted:
         raw = {
@@ -178,15 +248,13 @@ with col_form:
         st.rerun()  # aggiorna contatori + tabella subito
 
     if reset:
-        #azzera anche il riquadro “Risultato”
+        # azzera anche il riquadro “Risultato”
         st.session_state.last_result = None
-
         st.rerun()
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)  # chiusura card del form
 
 with col_res:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Risultato")
     lr = st.session_state.last_result
     if not lr:
@@ -202,20 +270,42 @@ with col_res:
 st.divider()
 
 # -------- CODA: tabella (con bordo) + barra azioni --------
-st.subheader("Coda a priorità (globale)")
+st.subheader("Attualmente in servizio")
 
 snap = q.snapshot()
 if not snap:
-    st.write("Nessun paziente in coda.")
+    st.write("Nessun paziente al pronto soccorso.")
 else:
     # --- CARD: paziente attualmente servito (top della coda) ---
     top = snap[0]
-    st.markdown('<div class="card" style="margin-bottom:10px">', unsafe_allow_html=True)
-    st.markdown("**▶️ In servizio ora**")
-    st.write(f"**ID** `{top.patient_id}` — {top.payload.get('name','')}")
-    tri_badge(top.triage)
-    st.markdown('</div>', unsafe_allow_html=True)
+    tri_col = TRIAGE_COLORS.get(top.triage, "#94a3b8")
+    waited_sec = max(0, int(datetime.utcnow().timestamp() - top.arrival_ts))
+    mm, ss = divmod(waited_sec, 60)
+    waited_str = f"{mm:02d}:{ss:02d}"
 
+    st.markdown(
+        f"""
+        <div class="serving" style="--serving-accent:{tri_col}">
+          <div class="title">▶️ In servizio ora</div>
+          <div></div>
+          <div class="meta"><strong>ID:</strong> <code>{top.patient_id}</code> — {top.payload.get('name', '')}</div>
+          <div>
+            <span class="badge" style="background:{tri_col};color:#000000;border-color:rgba(0,0,0,0)">
+                {top.triage}
+            </span>
+          </div>
+          <div class="meta">
+            Arrivo (UTC): {datetime.utcfromtimestamp(top.arrival_ts).strftime("%H:%M:%S")} • Attesa: {waited_str}
+          </div>
+          <div></div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.divider()
+
+    st.subheader("Coda a priorità (globale)")
     # --- Tabella con colonna 'In servizio' e riga evidenziata ---
     rows = []
     for i, p in enumerate(snap, start=1):
@@ -229,17 +319,18 @@ else:
         })
     df = pd.DataFrame(rows)
 
-
     def _opaque_top(row):
         # rende la PRIMA riga semitrasparente (opaca)
         return ['opacity: 0.55' if row.name == 0 else '' for _ in row]
-
 
     st.dataframe(
         df.style.apply(_opaque_top, axis=1),
         use_container_width=True,
         hide_index=True
     )
+
+    # --- micro-spazio tra tabella e barra azioni ---
+    st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
 
     # --- BARRA AZIONI (stessa linea) ---
     colA, colB1, colB2, colC = st.columns([1, 2, 1, 1])
@@ -274,15 +365,44 @@ else:
             st.info("Coda svuotata.")
             st.rerun()
 
-    # Dettagli (facoltativo)
+    # Dettagli
     with st.expander("Dettagli paziente (regole + facts)"):
-        sel = st.selectbox("Seleziona ID", options=[""] + [p.patient_id for p in q.snapshot()], index=0, key="detail_id")
+        ids_opts = [""] + [p.patient_id for p in q.snapshot()]
+        sel = st.selectbox("Seleziona ID", options=ids_opts, index=0, key="detail_id")
         if sel:
             pp = next((p for p in q.snapshot() if p.patient_id == sel), None)
             if pp:
-                st.write(f"**{pp.patient_id}** — {pp.payload.get('name','')}")
-                st.write("**Regole attivate:**")
-                st.code(explain_rules(pp.payload.get("rules", [])), language="text")
-                st.write("**Fatti (features):**")
-                st.json(pp.payload.get("facts", {}))
+                st.divider()
+                # Header compatto in 2 colonne
+                h1, h2 = st.columns([1, 1])
+                with h1:
+                    st.markdown(f"**ID:** <code>{pp.patient_id}</code>", unsafe_allow_html=True)
+                    st.markdown(f"**Nome:** {pp.payload.get('name', '')}")
+                with h2:
+                    tri_badge(pp.triage)
+                    st.markdown(f"**Arrivo (UTC):** {datetime.utcfromtimestamp(pp.arrival_ts).strftime('%H:%M:%S')}")
+
+                st.markdown("---")
+
+                # Contenuti a tab: Regole | Fatti
+                tab_rules, tab_facts = st.tabs(["Regole attivate", "Fatti (features)"])
+
+                with tab_rules:
+                    rules_text = explain_rules(pp.payload.get("rules", []))
+                    st.code(rules_text or "Nessuna regola attivata.", language="text")
+
+                with tab_facts:
+                    facts_dict = pp.payload.get("facts", {})
+                    if facts_dict:
+                        facts_rows = [{"Feature": k, "Valore": v} for k, v in sorted(facts_dict.items())]
+                        facts_df = pd.DataFrame(facts_rows)
+                        try:
+                            st.table(facts_df.style.hide_index())
+                        except Exception:
+                            # fallback se hide_index non è disponibile
+                            st.dataframe(facts_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("Nessun fact disponibile.")
+
+                st.markdown('</div>', unsafe_allow_html=True)
 
