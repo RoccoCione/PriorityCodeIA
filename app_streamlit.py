@@ -47,6 +47,38 @@ h3, .stMarkdown h3 { font-size: 1.3rem !important; }
 code, pre, .stCode { font-size: 0.95rem !important; }
 .stTabs [data-baseweb="tab-list"] { gap: 6px; }
 .stTabs [data-baseweb="tab"] { padding: 6px 10px; border-radius: 10px; border: 1px solid #e5e7eb; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
+/* --- Probabilità NB: barre orizzontali --- */
+.prob-box { margin-top: 6px; }
+.prob-row {
+  display: grid; grid-template-columns: 130px 1fr 64px; align-items: center;
+  gap: 8px; margin: 6px 0;
+}
+.prob-label { font-weight: 700; white-space: nowrap; }
+.prob-bar {
+  position: relative; height: 12px; border-radius: 999px; background: #f1f5f9; overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,.05);
+}
+.prob-fill {
+  position: absolute; left: 0; top: 0; bottom: 0; width: var(--w, 0%);
+  background: var(--c, #94a3b8); transition: width .25s ease;
+}
+.prob-val { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+
+/* --- DEBUG panel styling --- */
+.debug-box {
+   border-radius: 12px;
+  padding: 12px 14px; box-shadow: 0 1px 2px rgba(0,0,0,.04);
+}
+.debug-grid { display: grid; grid-template-columns: 170px 1fr; gap: 8px 12px; align-items: center; }
+.debug-k { font-weight: 700; color: #475569; }
+.chips { display:flex; flex-wrap:wrap; gap:6px; }
+.chip {
+  background:#f1f5f9; border:1px solid #e5e7eb; border-radius:999px; padding:4px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.9rem;
+}
+.soft-hr { height:1px; background:#e5e7eb; margin:10px 0; }
+
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -92,6 +124,30 @@ def compute_triage_min_from_fired(fired_ids):
         if r and "triage_min" in r.then:
             tri_min = r.then["triage_min"] if tri_min is None else max_sev(tri_min, r.then["triage_min"])
     return tri_min
+
+def render_prob_bars(probs: dict):
+    order = ["Rosso", "Giallo", "Verde", "Bianco"]  # ordine clinico
+    rows = []
+    for cls in order:
+        p = float(probs.get(cls, 0.0))  # si assume già numerico e tra 0 e 1
+        pct = max(0.0, min(100.0, round(p * 100, 1)))
+        color = TRIAGE_COLORS.get(cls, "#94a3b8")
+        label = f"{TRIAGE_EMOJI[cls]} {cls}"
+        width_pct = pct if pct > 0 else 0
+        if 0 < width_pct < 2:
+            width_pct = 2.0  # traccia minima per valori molto piccoli
+        row_html = (
+            '<div class="prob-row">'
+            f'<div class="prob-label">{label}</div>'
+            '<div class="prob-bar">'
+            f'<div class="prob-fill" style="width:{width_pct}%; background:{color};"></div>'
+            '</div>'
+            f'<div class="prob-val">{pct:.1f}%</div>'
+            '</div>'
+        )
+        rows.append(row_html)
+    st.markdown('<div class="prob-box">' + "".join(rows) + "</div>", unsafe_allow_html=True)
+
 
 # -------- HEADER + CONTATORI --------
 st.title("🩺 Triage Medico Semplificato — Demo")
@@ -185,7 +241,7 @@ with col_form:
             "id": patient.patient_id,
             "probs": probs
         }
-        st.rerun()  # aggiorna contatori + tabella subito
+        st.rerun()
 
     if reset:
         st.session_state.last_result = None
@@ -204,8 +260,7 @@ with col_res:
         st.code(explain_rules(lr["rules"]), language="text")
         if "probs" in lr and lr["probs"]:
             st.write("**Probabilità (Naive Bayes):**")
-            st.json({k: round(v, 3) for k, v in lr["probs"].items()})
-
+            render_prob_bars(lr["probs"])
 st.divider()
 
 # -------- CODA: tabella + barra azioni --------
@@ -340,7 +395,10 @@ else:
                 with tab_probs:
                     probs = pp.payload.get("probs", {})
                     if probs:
-                        st.json({k: round(v, 3) for k, v in probs.items()})
+                        st.markdown("**Probabilità (Naive Bayes)**")
+                        render_prob_bars(probs)  # usa lo stesso stile del pannello Risultato
+                        with st.expander("Mostra valori"):
+                            st.json({k: round(v, 3) for k, v in probs.items()})
                     else:
                         st.caption("Nessuna probabilità salvata per questo paziente.")
 
@@ -350,13 +408,7 @@ with st.expander("🔎 DEBUG pipeline (ultimo inserito)"):
     if not lr:
         st.caption("Inserisci prima un paziente.")
     else:
-        st.write("**Facts (dopo preprocess):**")
-        st.json(lr["facts"])
-
-        st.write("**Regole attivate (IDs):**")
-        st.write(lr["rules"])
-
-        # ricalcolo triage_rules e triage_min (solo debug)
+        # ricalcolo regole e vincolo
         triage_rules_dbg, fired_dbg, _facts_out_dbg = forward_chain(lr["facts"])
         kb_map = {r.id: r for r in default_kb()}
         order = ["Bianco","Verde","Giallo","Rosso"]
@@ -367,14 +419,54 @@ with st.expander("🔎 DEBUG pipeline (ultimo inserito)"):
             if r and "triage_min" in r.then:
                 tri_min_dbg = r.then["triage_min"] if tri_min_dbg is None else max_sev(tri_min_dbg, r.then["triage_min"])
 
-        st.write(f"**triage_rules (da regole):** {triage_rules_dbg}")
-        st.write(f"**triage_min (vincolo):** {tri_min_dbg if tri_min_dbg else '—'}")
+        # Header
+        st.markdown(
+            '<div class="debug-box">'
+            '<div class="debug-grid">'
+            f'<div class="debug-k">Paziente</div><div><code>{lr["id"]}</code> — {lr["name"]}</div>'
+            f'<div class="debug-k">Codice finale</div><div>', unsafe_allow_html=True
+        )
+        tri_badge(lr["triage"])
+        st.markdown('</div>', unsafe_allow_html=True)  # chiude la cella della grid
+        st.markdown(
+            f'<div class="debug-grid">'
+            f'<div class="debug-k">Da regole</div><div>{triage_rules_dbg}</div>'
+            f'<div class="debug-k">Vincolo (triage_min)</div><div>{tri_min_dbg if tri_min_dbg else "—"}</div>'
+            f'<div class="debug-k">Posizione in coda</div><div>{lr["pos"]} / {lr["queue_len"]}</div>'
+            '</div>'
+            '<div class="soft-hr"></div>',
+            unsafe_allow_html=True
+        )
 
-        # se salvate, mostra proba NB
-        if "probs" in lr:
-            st.write("**Probabilità NB salvate:**")
-            st.json({k: round(v,3) for k,v in lr["probs"].items()})
+        # Regole attivate (chips)
+        chips_html = ''.join(f'<span class="chip">{rid}</span>' for rid in fired_dbg)
+        st.markdown(f"**Regole attivate (IDs):**<div class='chips'>{chips_html or '—'}</div>", unsafe_allow_html=True)
+
+        # Probabilità
+        probs_dbg = lr.get("probs") or {}
+        if isinstance(probs_dbg, dict) and probs_dbg:
+            st.markdown("**Probabilità (Naive Bayes)**")
+            render_prob_bars(probs_dbg)
         else:
-            st.caption("Nessuna probabilità salvata.")
+            st.caption("Nessuna probabilità NB salvata per l'ultimo inserito.")
 
-        st.write(f"**Codice finale:** {lr['triage']}")
+        st.markdown('<div class="soft-hr"></div>', unsafe_allow_html=True)
+
+        # Facts
+        facts_dict = lr.get("facts", {})
+        st.markdown("**Facts (dopo preprocess)**")
+        if facts_dict:
+            facts_df = pd.DataFrame(
+                [{"Feature": k, "Valore": v} for k, v in sorted(facts_dict.items())]
+            )
+            try:
+                st.table(facts_df.style.hide_index())
+            except Exception:
+                st.dataframe(facts_df, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Nessun fact disponibile.")
+
+        # raw objects
+        with st.expander("Raw objects (debug avanzato)"):
+            st.write("last_result:")
+            st.json(lr)
